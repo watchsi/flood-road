@@ -1,0 +1,232 @@
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+    body { background-color: #f4f7f6; color: #333; }
+    header { background-color: #0056b3; color: white; padding: 20px; text-align: center; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    header h1 { font-size: 1.5rem; margin-bottom: 10px; }
+    button { background-color: #28a745; color: white; border: none; padding: 10px 15px; border-radius: 5px; font-size: 1rem; cursor: pointer; transition: background 0.3s; }
+    button:hover { background-color: #218838; }
+    main { padding: 20px; max-width: 600px; margin: 0 auto; }
+    .controls { display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; }
+    input, select { padding: 12px; border: 1px solid #ccc; border-radius: 5px; font-size: 1rem; width: 100%; }
+    .status-text { font-size: 0.9rem; color: #666; margin-bottom: 15px; text-align: right; }
+    .location-card { background: white; padding: 15px; border-radius: 8px; margin-bottom: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; border-left: 5px solid #ccc; }
+    .loc-info h3 { font-size: 1.1rem; color: #0056b3; margin-bottom: 5px; }
+    .loc-info p { font-size: 0.9rem; color: #555; }
+    .water-level { font-size: 1.3rem; font-weight: bold; text-align: right; min-width: 80px; }
+    .water-level span { font-size: 0.8rem; font-weight: normal; }
+    
+    /* สถานะสี */
+    .level-high { color: #dc3545; border-left-color: #dc3545; } /* แดง */
+    .level-med { color: #ffc107; border-left-color: #ffc107; } /* เหลือง */
+    .level-low { color: #28a745; border-left-color: #28a745; } /* เขียว */
+</style>
+
+
+<main>
+    <div class="controls">
+        <input type="text" id="searchInput" placeholder="ค้นหา ชื่อสถานี, ตำบล, อำเภอ, จังหวัด...">
+        <select id="intervalSelect">
+            <option value="5">อัพเดททุก 5 นาที (แนะนำ)</option>
+            <option value="15">อัพเดททุก 15 นาที</option>
+            <option value="30">อัพเดททุก 30 นาที</option>
+        </select>
+    </div>
+    
+    <p class="status-text">อัพเดทข้อมูลล่าสุด: <span id="lastUpdate">กำลังโหลด...</span></p>
+    <div id="locationList" class="location-list">
+        <!-- ข้อมูล API จะถูกโหลดมาแสดงที่นี่ -->
+    </div>
+</main>
+
+<script>
+    // -----------------------------------------
+    // 1. ตั้งค่า API ของ Data.go.th (ใส่ Token ของคุณแล้ว)
+    // -----------------------------------------
+    const API_TOKEN = "JRLhpOXfdevJ3vyYAV9TfcBsvlLr93YT"; 
+    const RESOURCE_ID = "61aff6a1-7733-4596-b68d-b490d802732c";
+    const API_URL = `https://opend.data.go.th/get-ckan/datastore_search?resource_id=${RESOURCE_ID}&limit=300`;
+
+    let locations = [];
+    let updateInterval;
+    let intervalTime = 60000 * 5; // เริ่มต้น 5 นาที
+
+    document.addEventListener('DOMContentLoaded', () => {
+        setupPWA();
+        fetchData();
+        setupEventListeners();
+        startAutoUpdate();
+    });
+
+    function setupEventListeners() {
+        document.getElementById('searchInput').addEventListener('input', renderList);
+        
+        document.getElementById('intervalSelect').addEventListener('change', (e) => {
+            intervalTime = parseInt(e.target.value) * 60000;
+            startAutoUpdate();
+        });
+
+        document.getElementById('enableNotifBtn').addEventListener('click', () => {
+            if ("Notification" in window) {
+                Notification.requestPermission().then(permission => {
+                    if (permission === "granted") {
+                        alert("เปิดระบบแจ้งเตือนสำเร็จ! แอปจะแจ้งเตือนเมื่อปริมาณฝน/น้ำลดลง");
+                    }
+                });
+            } else {
+                alert("เบราว์เซอร์ของคุณไม่รองรับระบบแจ้งเตือน");
+            }
+        });
+    }
+
+    function startAutoUpdate() {
+        clearInterval(updateInterval);
+        updateInterval = setInterval(fetchData, intervalTime);
+    }
+
+    // -----------------------------------------
+    // 2. ระบบดึงข้อมูลจาก API จริง
+    // -----------------------------------------
+    async function fetchData() {
+        try {
+            const response = await fetch(API_URL, {
+                method: 'GET',
+                headers: {
+                    'api-key': API_TOKEN 
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const jsonData = await response.json();
+            const currentData = jsonData.result.records;
+            
+            processNewData(currentData);
+            
+            const now = new Date();
+            document.getElementById('lastUpdate').innerText = now.toLocaleTimeString('th-TH');
+        } catch (error) {
+            console.error("เกิดข้อผิดพลาดในการดึงข้อมูล:", error);
+            document.getElementById('lastUpdate').innerText = "ดึงข้อมูลล้มเหลว กำลังลองใหม่...";
+        }
+    }
+
+    // -----------------------------------------
+    // 3. ระบบประมวลผลและแจ้งเตือน
+    // -----------------------------------------
+    function processNewData(newData) {
+        const savedData = JSON.parse(localStorage.getItem('bkk_flood_data')) || {};
+        
+        const formattedData = newData.map(item => {
+            // ดึงข้อมูลปริมาณฝน โดยลองค้นหาชื่อฟิลด์ที่น่าจะเป็นไปได้จากชุดข้อมูลนี้
+            let rainLevel = parseFloat(item.Rainfall_12H || item['ปริมาณฝน'] || item.Rainfall || 0); 
+            
+            return {
+                id: item._id || item['STN ID'],
+                name: item['ชื่อ'] || item.STN_NAME || `สถานี ${item._id}`,
+                district: `ต.${item['ตำบล'] || '-'} อ.${item['อำเภอ'] || '-'} จ.${item['จังหวัด'] || '-'}`,
+                level: isNaN(rainLevel) ? 0 : rainLevel
+            };
+        });
+
+        formattedData.forEach(loc => {
+            const oldLevel = savedData[loc.id]?.level;
+            
+            // ตรวจสอบว่าน้ำลดลงหรือไม่
+            if (oldLevel !== undefined && loc.level < oldLevel) {
+                const dropAmount = (oldLevel - loc.level).toFixed(1);
+                // แจ้งเตือนถ้าระดับเคยสูงกว่า 20 มม. และลดลง
+                if (oldLevel > 20 && dropAmount >= 1) {
+                    sendNotification(loc.name, oldLevel, loc.level, dropAmount);
+                }
+            }
+            savedData[loc.id] = loc;
+        });
+
+        localStorage.setItem('bkk_flood_data', JSON.stringify(savedData));
+        locations = formattedData;
+        renderList();
+    }
+
+    function sendNotification(locationName, oldLevel, newLevel, dropAmount) {
+        if ("Notification" in window && Notification.permission === "granted") {
+            new Notification(`ระดับน้ำ/ฝนลดลงที่ ${locationName}`, {
+                body: `ลดลง ${dropAmount} มม. (จาก ${oldLevel} เหลือ ${newLevel} มม.)`,
+                icon: 'https://cdn-icons-png.flaticon.com/512/414/414963.png'
+            });
+        }
+    }
+
+    function renderList() {
+        const searchTerm = document.getElementById('searchInput').value.toLowerCase();
+        const listContainer = document.getElementById('locationList');
+        listContainer.innerHTML = '';
+
+        const filtered = locations.filter(loc => 
+            loc.name.toLowerCase().includes(searchTerm) || 
+            loc.district.toLowerCase().includes(searchTerm)
+        );
+
+        filtered.forEach(loc => {
+            let statusClass = 'level-low';
+            
+            // ตั้งค่าเกณฑ์สี (ปรับแก้ได้ตามความเหมาะสมของข้อมูล)
+            if (loc.level >= 90) { 
+                statusClass = 'level-high'; 
+            } else if (loc.level >= 35) { 
+                statusClass = 'level-med'; 
+            }
+
+            const div = document.createElement('div');
+            div.className = `location-card ${statusClass}`;
+            div.innerHTML = `
+                <div class="loc-info">
+                    <h3>${loc.name}</h3>
+                    <p>${loc.district}</p>
+                </div>
+                <div class="water-level">
+                    ${loc.level} <br><span>มม.</span>
+                </div>
+            `;
+            listContainer.appendChild(div);
+        });
+    }
+
+    // -----------------------------------------
+    // 4. ตั้งค่า PWA (Manifest & Service Worker แบบอัตโนมัติ)
+    // -----------------------------------------
+    function setupPWA() {
+        // สร้าง Manifest
+        const manifest = {
+            name: "Thai Flood & Rain Monitor",
+            short_name: "FloodApp",
+            start_url: ".",
+            display: "standalone",
+            background_color: "#f4f7f6",
+            theme_color: "#0056b3",
+            icons: [{
+                src: "https://cdn-icons-png.flaticon.com/512/414/414963.png",
+                sizes: "512x512",
+                type: "image/png"
+            }]
+        };
+        const manifestStr = JSON.stringify(manifest);
+        document.getElementById('manifest-link').href = 'data:application/json;charset=utf-8,' + encodeURIComponent(manifestStr);
+
+        // สร้าง Service Worker เพื่อแคชข้อมูล (ให้ติดตั้งแอปได้)
+        if ('serviceWorker' in navigator) {
+            const swCode = `
+                self.addEventListener('install', (e) => {
+                    e.waitUntil(caches.open('flood-cache-v1').then((cache) => cache.addAll([location.href])));
+                });
+                self.addEventListener('fetch', (e) => {
+                    e.respondWith(caches.match(e.request).then((response) => response || fetch(e.request)));
+                });
+            `;
+            const blob = new Blob([swCode], { type: 'text/javascript' });
+            const swUrl = URL.createObjectURL(blob);
+            navigator.serviceWorker.register(swUrl).catch(err => console.log('SW setup skipped.'));
+        }
+    }
+</script>
